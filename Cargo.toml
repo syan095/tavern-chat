@@ -8,4 +8,4 @@ tokio = { version = "*", features = ["full"] }
 anyhow = "*"
 futures = "*"
 thiserror = "*"
-serde = { version = "*", features = ["derive"] }
+chrono = "*"

@@ -2,21 +2,34 @@
 //! Structs and enum here should be simple. More complex types,
 //! or types with more complex behavior should have their dedicated file.
 
-use serde::{Deserialize, Serialize};
-use std::time::Instant;
+use chrono::{DateTime, Local};
+use std::{fmt::Display, net::SocketAddr, time::SystemTime};
 use thiserror::Error;
 use tokio::net::{TcpStream, tcp::OwnedWriteHalf};
 
-pub type UserId = u32;
-pub type NpcId = u32;
 pub type ServerResult = Result<(), ServerError>;
 
-#[derive(Debug, Clone)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct UserId(pub u32);
+impl Display for UserId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}<User>", self.0)
+    }
+}
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NpcId(pub u32);
+impl Display for NpcId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}<Npc>", self.0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
     pub from: Option<ChatTarget>,
     pub to: ChatTarget,
     pub content: String,
-    pub timestamp: Instant,
+    pub timestamp: SystemTime,
     pub tone: MessageTone,
 }
 
@@ -31,16 +44,16 @@ impl Message {
             from,
             to,
             content: content.to_owned(),
-            timestamp: Instant::now(),
+            timestamp: SystemTime::now(),
             tone: tone.unwrap_or_default(),
         }
     }
 
     pub fn to_output(&self) -> String {
         format!(
-            "{:?} {:?} {:?}: {:?}",
-            self.timestamp,
-            self.from,
+            "{} {} {}: {}",
+            DateTime::<Local>::from(self.timestamp),
+            self.from.unwrap_or_default(),
             self.tone.clone(),
             self.content
         )
@@ -51,18 +64,34 @@ impl Message {
 pub enum Event {
     NewClient {
         connection: TcpStream,
+        addr: SocketAddr,
     },
     DisconnectClient {
         id: UserId,
     },
-    ReceiveMessage {
-        from: ChatTarget,
+    ReceiveUserMessage {
+        from: UserId,
         message_raw: String,
     },
     BroadcastMessage {
         message: Message,
     },
+    ChangeTarget {
+        id: UserId,
+        to: ChatTarget,
+    },
     Shutdown,
+}
+
+impl PartialEq for Event {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::NewClient { addr: l_addr, .. }, Self::NewClient { addr: r_addr, .. }) => {
+                l_addr == r_addr
+            }
+            (left, right) => left == right,
+        }
+    }
 }
 
 #[derive(Debug, Error, Clone, Copy)]
@@ -86,33 +115,63 @@ impl std::fmt::Display for ServerError {
 
 #[derive(Debug)]
 pub struct Client {
-    pub id: UserId,
     pub send_tx: OwnedWriteHalf,
     pub context: ClientContext,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Default, Copy)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Default)]
 pub enum ChatTarget {
     #[default]
     Global,
-    Client(UserId),
+    User(UserId),
     Npc(NpcId),
+}
+
+impl ChatTarget {
+    pub fn user(id: u32) -> Self {
+        Self::User(UserId(id))
+    }
+
+    pub fn npc(id: u32) -> Self {
+        Self::Npc(NpcId(id))
+    }
+}
+
+impl Display for ChatTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ChatTarget::Global => write!(f, "The World"),
+            ChatTarget::User(id) => write!(f, "User {id}"),
+            ChatTarget::Npc(id) => write!(f, "Npc {id}"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 // Caches current State of a client
 pub struct ClientContext {
-    pub current_target: Option<ChatTarget>,
+    pub current_target: ChatTarget,
     pub tone: MessageTone,
 }
 
 /// The emotion that's paired with this message
-#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MessageTone {
     #[default]
     Said,
     Yelled,
     Laughed,
     Whispered,
+}
+
+impl Display for MessageTone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            MessageTone::Said => "said",
+            MessageTone::Yelled => "yelled",
+            MessageTone::Laughed => "laughed",
+            MessageTone::Whispered => "whispered",
+        };
+        write!(f, "{s}")
+    }
 }

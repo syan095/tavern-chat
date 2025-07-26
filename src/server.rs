@@ -22,9 +22,9 @@ pub const TCP_PORT: &str = "127.0.0.1:8080";
 #[derive(Debug)]
 pub struct TavernServer {
     message_log: VecDeque<Message>,
-    npcs: Vec<Npc>,
+    npcs: HashMap<NpcId, Npc>,
     clients: HashMap<UserId, Client>,
-    next_user_id: UserId,
+    next_entity_id: u32,
     event_tx: mpsc::Sender<Event>,
     event_rx: mpsc::Receiver<Event>,
 }
@@ -37,7 +37,7 @@ impl TavernServer {
                 message_log: Default::default(),
                 npcs: Default::default(),
                 clients: Default::default(),
-                next_user_id: Default::default(),
+                next_entity_id: Default::default(),
                 event_tx: event_tx.clone(),
                 event_rx,
             },
@@ -59,16 +59,15 @@ impl TavernServer {
         while let Some(event) = self.event_rx.recv().await {
             println!("New event: {:?}", event);
             match event {
-                Event::NewClient { connection } => {
+                Event::NewClient { connection, .. } => {
                     // Assign a new ID to a new client.
-                    let id = self.next_user_id;
-                    self.next_user_id += 1;
+                    let id = UserId(self.next_entity_id);
+                    self.next_entity_id += 1;
 
                     let (read_half, write_half) = connection.into_split();
                     self.clients.insert(
                         id,
                         Client {
-                            id,
                             send_tx: write_half,
                             context: Default::default(),
                         },
@@ -81,15 +80,28 @@ impl TavernServer {
                     ));
                 }
                 Event::DisconnectClient { id } => self.remove_clients(id),
-                Event::ReceiveMessage { from, message_raw } => {
-                    let _ = crate::parser::parse_incoming_message(
-                        from,
-                        message_raw,
-                        self.event_tx.clone(),
-                    )
-                    .await;
+                Event::ReceiveUserMessage { from, message_raw } => {
+                    if let Some(client) = self.clients.get_mut(&from) {
+                        let _ = crate::parser::parse_incoming_message(
+                            from,
+                            message_raw,
+                            self.event_tx.clone(),
+                            &mut client.context,
+                        )
+                        .await;
+                    }
                 }
                 Event::BroadcastMessage { message } => self.broadcast_message(message).await,
+                Event::ChangeTarget { id, to } => {
+                    if match to {
+                        ChatTarget::Global => true,
+                        ChatTarget::User(to) => self.clients.contains_key(&to),
+                        ChatTarget::Npc(to) => self.npcs.contains_key(&to),
+                    } && let Some(client) = self.clients.get_mut(&id)
+                    {
+                        client.context.current_target = to;
+                    }
+                }
                 Event::Shutdown => {
                     // Shutdown all spawned threads.
                     let _ = shutdown_tx.send(());
@@ -153,7 +165,7 @@ impl TavernServer {
                 }
                 Ok(())
             }
-            ChatTarget::Client(id) => {
+            ChatTarget::User(id) => {
                 if let Some(client) = self.clients.get_mut(&id) {
                     to_client(&mut client.send_tx, id, message.content.clone())
                         .await
@@ -167,13 +179,13 @@ impl TavernServer {
             ChatTarget::Npc(_id) => todo!("NPC behavior to be implemented later"),
         } {
             // Send reply to Client user.
-            if let Some(ChatTarget::Client(sender)) = message.from {
+            if let Some(ChatTarget::User(sender)) = message.from {
                 let _ = self
                     .event_tx
                     .send(Event::BroadcastMessage {
                         message: Message::new(
                             None,
-                            ChatTarget::Client(sender),
+                            ChatTarget::User(sender),
                             format!("Failed to send message: {:?}", e).as_str(),
                             None,
                         ),
@@ -205,7 +217,7 @@ async fn manage_tcp_connections(
             tokio::select! {
                 Ok((socket, addr)) = listener.accept() => {
                     println!("🍺 New client connected: {addr}");
-                    let _ = event_dispatch.send(Event::NewClient { connection: socket }).await;
+                    let _ = event_dispatch.send(Event::NewClient { connection: socket, addr}).await;
                 }
                 Ok(()) = shutdown.changed() => {
                     break;
@@ -229,7 +241,7 @@ fn watch_client(
                 res  = lines.next_line() => {
                     match res {
                         Ok(Some(incoming)) => {
-                            let _ = event_tx.send(Event::ReceiveMessage{from: ChatTarget::Client(id), message_raw: incoming}).await;
+                            let _ = event_tx.send(Event::ReceiveUserMessage{from: id, message_raw: incoming}).await;
                         },
                         Ok(None) | Err(_) => {
                             println!("❌ Error in connecting to user: {:?}", id);
