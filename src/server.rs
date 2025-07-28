@@ -78,6 +78,15 @@ impl TavernServer {
                         self.event_tx.clone(),
                         shutdown_rx.clone(),
                     ));
+                    let _ = self
+                        .event_tx
+                        .send(Event::NotifyClient {
+                            notification: SystemNotification {
+                                to: id,
+                                content: "Welcome to Tavern chat!".to_string(),
+                            },
+                        })
+                        .await;
                 }
                 Event::DisconnectClient { id } => self.remove_clients(id),
                 Event::ReceiveUserMessage { from, message_raw } => {
@@ -102,7 +111,36 @@ impl TavernServer {
                         client.context.current_target = to;
                     }
                 }
+                Event::NotifyClient { notification } => {
+                    if let Some(client) = self.clients.get_mut(&notification.to) {
+                        if to_client(
+                            &mut client.send_tx,
+                            notification.to,
+                            notification.to_output(),
+                        )
+                        .await
+                        .is_err()
+                        {
+                            // Disconnect client if message can't be sent
+                            let _ = self
+                                .event_tx
+                                .send(Event::DisconnectClient {
+                                    id: notification.to,
+                                })
+                                .await;
+                        }
+                    }
+                }
                 Event::Shutdown => {
+                    // Notify everyone about the server shutdown.
+                    self.broadcast_message(Message::new(
+                        None,
+                        ChatTarget::Global,
+                        "Server Shutdown! So long!",
+                        None,
+                    ))
+                    .await;
+
                     // Shutdown all spawned threads.
                     let _ = shutdown_tx.send(());
                     self.shutdown();
@@ -139,19 +177,6 @@ impl TavernServer {
             let _ = self.message_log.pop_front();
         }
 
-        let to_client =
-            async |send_tx: &mut OwnedWriteHalf, id: UserId, message: String| -> ServerResult {
-                // Ignore error when broadcasting.
-                send_tx
-                    .write_all(message.as_bytes())
-                    .await
-                    .map_err(|_| ServerError::TcpConnectionFailed(id))?;
-                send_tx
-                    .flush()
-                    .await
-                    .map_err(|_| ServerError::TcpConnectionFailed(id))?;
-                Ok(())
-            };
         let mut failed_client = vec![];
 
         if let Err(e) = match message.to {
@@ -159,7 +184,9 @@ impl TavernServer {
                 // Broadcast the message to all clients
                 println!("Global: {:?}", message.content.clone());
                 for (id, client) in self.clients.iter_mut() {
-                    if let Err(_) = to_client(&mut client.send_tx, *id, message.to_output()).await {
+                    if let Err(_) =
+                        to_client(&mut client.send_tx, *id, message.to_output(false)).await
+                    {
                         failed_client.push(*id);
                     }
                 }
@@ -167,7 +194,7 @@ impl TavernServer {
             }
             ChatTarget::User(id) => {
                 if let Some(client) = self.clients.get_mut(&id) {
-                    to_client(&mut client.send_tx, id, message.content.clone())
+                    to_client(&mut client.send_tx, id, message.to_output(true))
                         .await
                         .inspect_err(|_| {
                             failed_client.push(id);
@@ -182,13 +209,11 @@ impl TavernServer {
             if let Some(ChatTarget::User(sender)) = message.from {
                 let _ = self
                     .event_tx
-                    .send(Event::BroadcastMessage {
-                        message: Message::new(
-                            None,
-                            ChatTarget::User(sender),
-                            format!("Failed to send message: {:?}", e).as_str(),
-                            None,
-                        ),
+                    .send(Event::NotifyClient {
+                        notification: SystemNotification {
+                            to: sender,
+                            content: format!("Failed to send message: {:?}", e),
+                        },
                     })
                     .await;
             }
@@ -225,6 +250,19 @@ async fn manage_tcp_connections(
             }
         }
     }))
+}
+
+async fn to_client(send_tx: &mut OwnedWriteHalf, id: UserId, message: String) -> ServerResult {
+    // Ignore error when broadcasting.
+    send_tx
+        .write_all(message.as_bytes())
+        .await
+        .map_err(|_| ServerError::TcpConnectionFailed(id))?;
+    send_tx
+        .flush()
+        .await
+        .map_err(|_| ServerError::TcpConnectionFailed(id))?;
+    Ok(())
 }
 
 /// A new TCP client has been connected to the server.

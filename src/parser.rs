@@ -19,22 +19,31 @@ pub async fn parse_incoming_message(
 
     if message_raw.starts_with('/') {
         let split = message_raw.splitn(2, " ").into_iter().collect::<Vec<_>>();
-        let (command, msg) = (split[0], split[1]);
+        let (command, msg) = (*split.get(0).unwrap(), *split.get(1).unwrap_or(&""));
 
         match command.to_ascii_lowercase().as_str() {
             // Command related to Saying something
-            "/say" => {
-                reply = say_with_tone(from, MessageTone::Said, msg, client_ctx, &event_tx).await
+            "/say" | "/s" => {
+                reply =
+                    say_something(from, msg, client_ctx, &event_tx, Some(MessageTone::Said)).await
             }
             "/yell" => {
-                reply = say_with_tone(from, MessageTone::Yelled, msg, client_ctx, &event_tx).await
-            }
-            "/laughed" => {
-                reply = say_with_tone(from, MessageTone::Laughed, msg, client_ctx, &event_tx).await
-            }
-            "/whispered" => {
                 reply =
-                    say_with_tone(from, MessageTone::Whispered, msg, client_ctx, &event_tx).await
+                    say_something(from, msg, client_ctx, &event_tx, Some(MessageTone::Yelled)).await
+            }
+            "/laugh" => {
+                reply = say_something(from, msg, client_ctx, &event_tx, Some(MessageTone::Laughed))
+                    .await
+            }
+            "/whisper" | "/w" => {
+                reply = say_something(
+                    from,
+                    msg,
+                    client_ctx,
+                    &event_tx,
+                    Some(MessageTone::Whispered),
+                )
+                .await
             }
             // Set chat target
             "/to_user" => {
@@ -70,6 +79,61 @@ pub async fn parse_incoming_message(
                     })
                     .await;
             }
+            // Emote
+            "/wave" => {
+                say_something(
+                    from,
+                    format!("You waved at {}. Wassup?", client_ctx.current_target).as_str(),
+                    client_ctx,
+                    &event_tx,
+                    None,
+                )
+                .await;
+            }
+            "/poke" => {
+                say_something(
+                    from,
+                    format!("You poked {}. Hey!", client_ctx.current_target).as_str(),
+                    client_ctx,
+                    &event_tx,
+                    None,
+                )
+                .await;
+            }
+            "/lol" => {
+                say_something(
+                    from,
+                    "You laughed out loud. A ha HA!",
+                    client_ctx,
+                    &event_tx,
+                    Some(MessageTone::Laughed),
+                )
+                .await;
+            }
+            "/cry" => {
+                say_something(
+                    from,
+                    format!(
+                        "You cried on {}'s shoulder. There there.",
+                        client_ctx.current_target
+                    )
+                    .as_str(),
+                    client_ctx,
+                    &event_tx,
+                    None,
+                )
+                .await;
+            }
+            "/dance" => {
+                say_something(
+                    from,
+                    "You danced on top of a table! What a jolly time!",
+                    client_ctx,
+                    &event_tx,
+                    None,
+                )
+                .await;
+            }
 
             // System commands
             "/shutdown" => {
@@ -80,6 +144,9 @@ pub async fn parse_incoming_message(
                 reply = Some("Unknown command.".to_string());
             }
         }
+    } else {
+        // Say the message to the current target
+        reply = say_something(from, message_raw.as_str(), client_ctx, &event_tx, None).await
     }
 
     if let Some(reply) = reply {
@@ -88,7 +155,7 @@ pub async fn parse_incoming_message(
                 message: Message::new(
                     None,
                     ChatTarget::User(from),
-                    reply.as_str(),
+                    format!("{}\n{} >", reply, client_ctx.tone).as_str(),
                     Default::default(),
                 ),
             })
@@ -98,29 +165,37 @@ pub async fn parse_incoming_message(
     Ok(())
 }
 
-async fn say_with_tone(
+async fn say_something(
     from: UserId,
-    tone: MessageTone,
     msg: &str,
     client_ctx: &mut ClientContext,
     event_tx: &Sender<Event>,
+    new_tone: Option<MessageTone>,
 ) -> Option<String> {
-    client_ctx.tone = tone;
+    let tone = if let Some(tone) = new_tone {
+        client_ctx.tone = tone;
+        tone
+    } else {
+        client_ctx.tone
+    };
 
-    let from = ChatTarget::User(from);
-    let to = client_ctx.current_target;
+    // Send message if content is non-empty
+    if !msg.is_empty() {
+        let from = ChatTarget::User(from);
+        let to = client_ctx.current_target;
 
-    // Send message out
-    let _ = event_tx
-        .send(Event::BroadcastMessage {
-            message: Message::new(Some(from), to, msg, Some(tone)),
-        })
-        .await;
+        // Send message out
+        let _ = event_tx
+            .send(Event::BroadcastMessage {
+                message: Message::new(Some(from), to, msg, Some(tone)),
+            })
+            .await;
+    }
 
     // Reply back if the message is not a Global broadcast.
     match client_ctx.current_target {
-        ChatTarget::User(id) => Some(format!("To {}: {} \nSay > ", id, msg)),
-        ChatTarget::Npc(id) => Some(format!("To {}: {} \nSay > ", id, msg)),
+        ChatTarget::User(id) => Some(format!("To {}: {}", id, msg)),
+        ChatTarget::Npc(id) => Some(format!("To {}: {}", id, msg)),
         _ => None,
     }
 }

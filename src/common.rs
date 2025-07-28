@@ -49,12 +49,28 @@ impl Message {
         }
     }
 
-    pub fn to_output(&self) -> String {
+    pub fn to_output(&self, is_private: bool) -> String {
         format!(
-            "{} {} {}: {}",
+            "{} {} {} {}: {}\n",
             DateTime::<Local>::from(self.timestamp),
             self.from.unwrap_or_default(),
             self.tone.clone(),
+            is_private.then_some("*privately*").unwrap_or(""),
+            self.content
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemNotification {
+    pub to: UserId,
+    pub content: String,
+}
+impl SystemNotification {
+    pub fn to_output(&self) -> String {
+        format!(
+            "{} System: {}\n",
+            DateTime::<Local>::from(SystemTime::now()),
             self.content
         )
     }
@@ -79,6 +95,9 @@ pub enum Event {
     ChangeTarget {
         id: UserId,
         to: ChatTarget,
+    },
+    NotifyClient {
+        notification: SystemNotification,
     },
     Shutdown,
 }
@@ -141,8 +160,8 @@ impl Display for ChatTarget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ChatTarget::Global => write!(f, "The World"),
-            ChatTarget::User(id) => write!(f, "User {id}"),
-            ChatTarget::Npc(id) => write!(f, "Npc {id}"),
+            ChatTarget::User(id) => write!(f, "{id}"),
+            ChatTarget::Npc(id) => write!(f, "{id}"),
         }
     }
 }
